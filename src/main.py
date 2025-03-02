@@ -1,14 +1,8 @@
-# Todo: read file
-# Todo: hash doc content for doc id
-# Todo: excerpt text (smart excerpts or char count?)
-# Todo: create embeddings
-# Todo: dedupe embedding excerpts
 # Todo: extract entities (for low-level and high-level)
 # Todo: extract entity relations (for low-level and high-level)
 # Todo: create embeddings for descriptions of the relations
 # Todo: dedupe entities and relations (against current data and cache)
 # Todo: create caches for embeddings/entities/relations (do not create new embeddings if hashes of strings match)
-# Todo: all embeddings and entities/relations need to be linked back to original document for removal
 # Todo: clean up any text, trim excess white space at end of text and between paragraphs
 # Todo: store entities/relations in networkx (allow various kg store managers)
 # Todo: store data in nano-vectordb (allow for various vector store managers)
@@ -22,8 +16,6 @@ import time
 
 import numpy as np
 from dotenv import load_dotenv
-from dataclasses import field, dataclass
-from datetime import datetime
 from textwrap import wrap
 
 from nano_vectordb import NanoVectorDB
@@ -80,7 +72,19 @@ def remove_from_json(file_path, key):
 
 
 def remove_document_by_id(doc_id):
-    pass
+    doc_id_to_excerpt_ids = get_json(DOC_ID_TO_EXCERPT_IDS)
+    doc_id_to_source_map = get_json(DOC_ID_TO_SOURCE_MAP)
+    if doc_id in doc_id_to_source_map:
+        source = doc_id_to_source_map[doc_id]
+        remove_from_json(DOC_ID_TO_SOURCE_MAP, doc_id)
+        remove_from_json(SOURCE_TO_DOC_ID_MAP, source)
+    if doc_id in doc_id_to_excerpt_ids:
+        excerpt_ids = doc_id_to_excerpt_ids[doc_id]
+        for excerpt_id in excerpt_ids:
+            remove_from_json(EXCERPT_DB, excerpt_id)
+        remove_from_json(DOC_ID_TO_EXCERPT_IDS, doc_id)
+        embeddings_db.delete(excerpt_ids)
+        embeddings_db.save()
 
 
 def get_completion(query, model="gpt-4o-mini", context=""):
@@ -145,7 +149,7 @@ def import_documents():
         elif source_to_doc_id_map[source] != doc_id:
             logger.info(f"updating existing document {source} with id {doc_id}")
             old_doc_id = source_to_doc_id_map[source]
-            remove_old_document_maps(source, old_doc_id)
+            remove_document_by_id(old_doc_id)
             add_document_maps(source, content)
             embed_document(content, doc_id)
         else:
@@ -162,7 +166,7 @@ def embed_document(content, doc_id):
         embedding_content = f"{excerpt}\n\n{summary}"
         embedding_result = get_embedding(embedding_content)
         vector = np.array(embedding_result, dtype=np.float32)
-        embeddings_db.upsert([{"__id__": excerpt_id, "__vector__": vector}])
+        embeddings_db.upsert([{"__id__": excerpt_id, "__vector__": vector, "__doc_id__": doc_id, "__inserted_at__": time.time()}])
         add_to_json(EXCERPT_DB, excerpt_id, {
             "doc_id": doc_id,
             "doc_order_index": i,
@@ -202,11 +206,6 @@ def add_document_maps(source, content):
     add_to_json(DOC_ID_TO_SOURCE_MAP, doc_id, source)
 
 
-def remove_old_document_maps(source, old_doc_id):
-    remove_from_json(SOURCE_TO_DOC_ID_MAP, source)
-    remove_from_json(DOC_ID_TO_SOURCE_MAP, old_doc_id)
-
-
 def create_file_if_not_exists(path, default_content=""):
     if not os.path.exists(path):
         with open(path, 'w') as file:
@@ -216,6 +215,7 @@ def create_file_if_not_exists(path, default_content=""):
 def get_json(path):
     with open(path, "r") as f:
         return json.load(f)
+
 
 def query(text):
     embedding = get_embedding(text)
@@ -248,8 +248,9 @@ Response parameters:
 {excerpt_data["summary"]}
 
 """
-    print(system_prompt)
+
     return get_completion(text, context=system_prompt)
+
 
 if __name__ == '__main__':
     create_file_if_not_exists(SOURCE_TO_DOC_ID_MAP, "{}")
@@ -259,4 +260,8 @@ if __name__ == '__main__':
     set_logger("main.log")
 
     import_documents()
-    print(query("what do cats eat?"))
+
+    print(query("what do rabbits eat?")) # Should answer
+    print(query("what do cats eat?")) # Should reject
+
+    # remove_document_by_id("doc_4c3f8100da0b90c1a44c94e6b4ffa041")
