@@ -100,15 +100,3 @@ The deletion of a document, triggered by an update or a manual removal, is perfo
 
 This deletion process guarantees that all traces of the old document—including its excerpts, summaries, and
 embeddings—are completely removed from the system.
-
----
-
-## Summary
-
-- **Updates:** The system uses a hash to detect changes in document content. If the hash changes, it removes the old
-  document and all related data before ingesting the new version.
-- **Deletion:** The `remove_document_by_id` function clears all mappings, excerpts, and embeddings associated with a
-  document, ensuring data consistency and preventing stale data from affecting queries.
-
-By leveraging these mechanisms, Mini RAG efficiently manages document updates and deletions, maintaining a reliable and
-up-to-date knowledge base for semantic querying.
