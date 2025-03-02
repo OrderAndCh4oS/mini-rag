@@ -77,7 +77,7 @@ for the file. The update process works as follows:
         - New vector embeddings are generated and stored.
 
 This approach ensures that only the current content of a document is stored and queried, preventing outdated information
-from persisting in the system.l
+from persisting in the system.
 
 ## Document Deletion Process
 
