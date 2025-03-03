@@ -1,7 +1,7 @@
 import logging
 import os.path
 
-from src.definitions import LOG_DIR
+from app.definitions import LOG_DIR
 
 logger = logging.getLogger("mini-rag")
 
