@@ -9,11 +9,11 @@
 # Todo: implement naive/local/global/hybrid queries
 # Todo: implement delete doc
 # Todo: explore kag patterns/strategies
-import inspect
+import os
 import time
 
+import networkx as nx
 import numpy as np
-from textwrap import wrap
 
 from nano_vectordb import NanoVectorDB
 
@@ -21,10 +21,11 @@ from app.llm import get_embedding, get_completion
 from app.logger import logger, set_logger
 
 from app.definitions import INPUT_DOCS_DIR, SOURCE_TO_DOC_ID_MAP, DOC_ID_TO_SOURCE_MAP, EMBEDDINGS_DB, \
-    EXCERPT_DB, DOC_ID_TO_EXCERPT_IDS
+    EXCERPT_DB, DOC_ID_TO_EXCERPT_IDS, KG_DB
+from app.prompts import get_query_system_prompt, excerpt_summary_prompt, get_extract_entities_prompt
 
 from app.utilities import get_json, remove_from_json, read_file, get_docs, make_hash, add_to_json, \
-    create_file_if_not_exists
+    create_file_if_not_exists, split_string_by_multi_markers, clean_str
 
 dim = 1536
 embeddings_db = NanoVectorDB(dim, storage_file=EMBEDDINGS_DB)
@@ -53,16 +54,19 @@ def import_documents():
         doc_id = make_hash(content, "doc_")
 
         source_to_doc_id_map = get_json(SOURCE_TO_DOC_ID_MAP)
+
         if source not in source_to_doc_id_map:
             logger.info(f"importing new document {source} with id {doc_id}")
             add_document_maps(source, content)
             embed_document(content, doc_id)
+            extract_entities(content, doc_id)
         elif source_to_doc_id_map[source] != doc_id:
             logger.info(f"updating existing document {source} with id {doc_id}")
             old_doc_id = source_to_doc_id_map[source]
             remove_document_by_id(old_doc_id)
             add_document_maps(source, content)
             embed_document(content, doc_id)
+            extract_entities(content, doc_id)
         else:
             logger.info(f"no changes, skipping document {source} with id {doc_id}")
 
@@ -98,77 +102,114 @@ def embed_document(content, doc_id):
     add_to_json(DOC_ID_TO_EXCERPT_IDS, doc_id, excerpt_ids)
 
 
-def get_excerpts(content, n=2000):
-    return wrap(content, n)
+def get_excerpts(content, n=2000, overlap=200):
+    excerpts = []
+    step = n - overlap
+    for i in range(0, len(content), step):
+        excerpts.append(content[i:i + n])
+    return excerpts
 
 
-def get_excerpt_summary(content, excerpt):
-    summary = get_completion(inspect.cleandoc(f"""
-        Create a concise, short one sentence summary of how the <excerpt> relates to the broader context of the <full-document> and surrounding content.  
+def get_excerpt_summary(full_doc, excerpt):
+    prompt = excerpt_summary_prompt(full_doc, excerpt)
+    summary = get_completion(prompt)
 
-        <full-document>
-        {content}
-        </full-document>
-        
-        <excerpt>
-        {excerpt}
-        </excerpt>
-        
-        Respond with the summary only.
-    """))
-
-    logger.info(f"excerpt {excerpt}, summary {summary}")
+    logger.info(f"Excerpt:\n{excerpt}\n\nSummary:\n{summary}")
 
     return summary
 
 
+def extract_entities(content, doc_id):
+    excerpts = get_excerpts(content)
+    graph = None
+    if os.path.exists(KG_DB):
+        try:
+            graph = nx.read_graphml(KG_DB)
+            logger.info(f"Loaded existing graph from {KG_DB}")
+        except Exception as e:
+            logger.error(f"Error loading graph from {KG_DB}: {e}")
+            graph = nx.DiGraph()
+    else:
+        graph = nx.DiGraph()
+        logger.info("No existing graph found. Creating a new graph.")
+
+    for excerpt in excerpts:
+        result = get_completion(get_extract_entities_prompt(excerpt))
+        logger.info(result)
+        # --- Data Cleaning ---
+        # Remove the trailing '<|COMPLETE|>' marker
+        data_str = result.replace('<|COMPLETE|>', '').strip()
+
+        # --- Split the Data into Records ---
+        # Split the data using the "+|+" marker
+        records = split_string_by_multi_markers(data_str, ['+|+'])
+
+        # Remove surrounding parentheses from each record if present
+        clean_records = []
+        for record in records:
+            if record.startswith('(') and record.endswith(')'):
+                record = record[1:-1]
+            clean_records.append(clean_str(record))
+        records = clean_records
+
+        for record in records:
+            fields = split_string_by_multi_markers(record, ['<|>'])
+            if not fields:
+                continue
+            record_type = fields[0].lower()
+            logger.info(f"{record_type} {len(fields)}")
+            if record_type == '"entity"':
+                if len(fields) >= 4:
+                    _, name, category, description = fields[:4]
+                    logger.info(f"Entity - Name: {name}, Category: {category}, Description: {description}")
+                    graph.add_node(name, category=category, description=description)
+            elif record_type == '"relationship"':
+                if len(fields) >= 6:
+                    _, source, target, description, keywords, weight = fields[:6]
+                    logger.info(f"Relationship - Source: {source}, Target: {target}, Description: {description}, Keywords: {keywords}, Weight: {weight}")
+                    graph.add_edge(source, target, description=description, keywords=keywords, weight=weight)
+            elif record_type == '"content_keywords"':
+                if len(fields) >= 2:
+                    logger.info(f"Content Keywords: {fields[1]}")
+                    graph.graph['content_keywords'] = fields[1]
+
+    nx.write_graphml(graph, KG_DB)
+    # --- Verification: Print the Graph Contents ---
+    print("Nodes:")
+    for node, data in graph.nodes(data=True):
+        print(f"{node}: {data}")
+
+    print("\nEdges:")
+    for src, tgt, data in graph.edges(data=True):
+        print(f"{src} -> {tgt}: {data}")
+
+    if 'content_keywords' in graph.graph:
+        print("\nGraph Metadata:")
+        print("content_keywords:", graph.graph['content_keywords'])
+
+
 def query(text):
+    logger.info(f"Received Query:\n{text}")
     embedding = get_embedding(text)
     embedding_array = np.array(embedding)
     results = embeddings_db.query(query=embedding_array, top_k=5, better_than_threshold=0.02)
     excerpt_db = get_json(EXCERPT_DB)
-    system_prompt = inspect.cleandoc("""
-        You are a professional assistant responsible for answering questions related the to following information in the sources. Each source will contain an excerpt which has been pulled from accurate source material and a summary which outlines the broader context from which the excerpt was taken.
-
-        The excerpts are the source of truth, However, the summaries will contain additional contextual information that may have been lost when extracting the excerpt from the real-life document. Favour information from excerpts where possible.
-        
-        If you don't know the answer, just say so. Do not make anything up or include information where the supporting evidence is not provided.
-        
-        Response parameters:
-         - Answers must be in en_GB english
-         - Use markdown formatting with appropriate section headings
-         - Each section should focus on one main point or aspect of the answer
-         - Use clear and descriptive section titles that reflect the content
-    """)
-    system_prompt += "\n\n"
-    for i, result in enumerate(results):
-        excerpt_data = excerpt_db[result["__id__"]]
-        system_prompt += inspect.cleandoc(f"""
-            # Source {i + 1}.
-    
-            ## Excerpt
-            
-            {excerpt_data["excerpt"]}
-            
-            ## Summary
-            
-            {excerpt_data["summary"]} 
-        """)
-        system_prompt += "\n\n"
+    system_prompt = get_query_system_prompt(excerpt_db, results)
 
     return get_completion(text, context=system_prompt.strip())
 
 
 if __name__ == '__main__':
-    # create_file_if_not_exists(SOURCE_TO_DOC_ID_MAP, "{}")
-    # create_file_if_not_exists(DOC_ID_TO_SOURCE_MAP, "{}")
-    # create_file_if_not_exists(DOC_ID_TO_EXCERPT_IDS, "{}")
-    # create_file_if_not_exists(EXCERPT_DB, "{}")
-    # set_logger("main.log")
-    #
-    # import_documents()
+    set_logger("main.log")
 
-    print(query("what do rabbits eat?"))  # Should answer
-    print(query("what do cats eat?"))  # Should reject
+    create_file_if_not_exists(SOURCE_TO_DOC_ID_MAP, "{}")
+    create_file_if_not_exists(DOC_ID_TO_SOURCE_MAP, "{}")
+    create_file_if_not_exists(DOC_ID_TO_EXCERPT_IDS, "{}")
+    create_file_if_not_exists(EXCERPT_DB, "{}")
+
+    import_documents()
+
+    # print(query("what do rabbits eat?"))  # Should answer
+    # print(query("what do cats eat?"))  # Should reject
 
     # remove_document_by_id("doc_4c3f8100da0b90c1a44c94e6b4ffa041")
