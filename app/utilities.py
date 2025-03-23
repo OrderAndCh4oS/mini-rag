@@ -3,6 +3,7 @@ import json
 import os
 import re
 from hashlib import md5
+from typing import Union
 
 
 def create_file_if_not_exists(file_path, default_content=""):
@@ -80,3 +81,14 @@ def split_string_by_multi_markers(content: str, markers: list[str]) -> list[str]
         return [content]
     results = re.split("|".join(re.escape(marker) for marker in markers), content)
     return [r.strip() for r in results if r.strip()]
+
+
+def extract_json_from_text(content: str):
+    json_str = re.search(r"{.*}", content, re.DOTALL)
+    if json_str is not None:
+        json_str = json_str.group(0)
+        try:
+            return json.loads(json_str)
+        except json.JSONDecodeError:
+            return None
+    return None

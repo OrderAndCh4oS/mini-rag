@@ -22,10 +22,11 @@ from app.logger import logger, set_logger
 
 from app.definitions import INPUT_DOCS_DIR, SOURCE_TO_DOC_ID_MAP, DOC_ID_TO_SOURCE_MAP, EMBEDDINGS_DB, \
     EXCERPT_DB, DOC_ID_TO_EXCERPT_IDS, KG_DB, ENTITIES_DB, RELATIONSHIPS_DB
-from app.prompts import get_query_system_prompt, excerpt_summary_prompt, get_extract_entities_prompt
+from app.prompts import get_query_system_prompt, excerpt_summary_prompt, get_extract_entities_prompt, \
+    get_high_low_level_keywords_prompt
 
 from app.utilities import get_json, remove_from_json, read_file, get_docs, make_hash, add_to_json, \
-    create_file_if_not_exists, split_string_by_multi_markers, clean_str
+    create_file_if_not_exists, split_string_by_multi_markers, clean_str, extract_json_from_text
 
 dim = 1536
 embeddings_db = NanoVectorDB(dim, storage_file=EMBEDDINGS_DB)
@@ -130,12 +131,13 @@ def extract_entities(content, doc_id):
             logger.info(f"Loaded existing graph from {KG_DB}")
         except Exception as e:
             logger.error(f"Error loading graph from {KG_DB}: {e}")
-            graph = nx.DiGraph()
+            graph = nx.Graph()
     else:
-        graph = nx.DiGraph()
+        graph = nx.Graph()
         logger.info("No existing graph found. Creating a new graph.")
 
     for excerpt in excerpts:
+        excerpt_id = make_hash(excerpt, "excerpt_id_")
         result = get_completion(get_extract_entities_prompt(excerpt))
         logger.info(result)
 
@@ -161,7 +163,7 @@ def extract_entities(content, doc_id):
                 if len(fields) >= 4:
                     _, name, category, description = fields[:4]
                     logger.info(f"Entity - Name: {name}, Category: {category}, Description: {description}")
-                    graph.add_node(name, category=category, description=description)
+                    graph.add_node(name, category=category, description=description, excerpt_id=excerpt_id)
                     entity_id = make_hash(name, prefix="ent-")
                     embedding_content = f"{name} {description}"
                     embedding_result = get_embedding(embedding_content)
@@ -178,7 +180,8 @@ def extract_entities(content, doc_id):
                 if len(fields) >= 6:
                     _, source, target, description, keywords, weight = fields[:6]
                     logger.info(
-                        f"Relationship - Source: {source}, Target: {target}, Description: {description}, Keywords: {keywords}, Weight: {weight}")
+                        f"Relationship - Source: {source}, Target: {target}, Description: {description}, Keywords: {keywords}, Weight: {weight}"
+                    )
                     graph.add_edge(source, target, description=description, keywords=keywords, weight=weight)
                     relationship_id = make_hash(f"{source}_{target}", prefix="ent-")
                     embedding_content = f"{keywords} {source} {target} {description}"
@@ -227,17 +230,62 @@ def query(text):
     return get_completion(text, context=system_prompt.strip())
 
 
+def kg_query(text):
+    prompt = get_high_low_level_keywords_prompt(text)
+    result = get_completion(prompt)
+    keyword_data = extract_json_from_text(result)
+    print(keyword_data)
+
+    ll_keywords = keyword_data.get("low_level_keywords", [])
+    print(ll_keywords)
+    if len(ll_keywords):
+        ll_embedding = get_embedding(ll_keywords)
+        ll_embedding_array = np.array(ll_embedding)
+        ll_results = entities_db.query(query=ll_embedding_array, top_k=5, better_than_threshold=0.02)
+        print(ll_results)
+    graph = nx.read_graphml(KG_DB)
+    ll_data = [graph.nodes.get(r["__entity_name__"]) for r in ll_results]
+    ll_degrees = [graph.degree(r["__entity_name__"]) for r in ll_results]
+    print(ll_degrees)
+    print(ll_data)
+    ll_dataset = [
+        {**n, "entity_name": k["__entity_name__"], "rank": d}
+        for k, n, d in zip(ll_results, ll_data, ll_degrees)
+    ]
+    print(ll_dataset)
+
+    # Todo: remove duplication of functionality here
+    hl_keywords = keyword_data.get("high_level_keywords", [])
+    print(hl_keywords)
+    if len(hl_keywords):
+        hl_embedding = get_embedding(hl_keywords)
+        hl_embedding_array = np.array(hl_embedding)
+        hl_results = entities_db.query(query=hl_embedding_array, top_k=5, better_than_threshold=0.02)
+        print(hl_results)
+    hl_data = [graph.nodes.get(r["__entity_name__"]) for r in hl_results]
+    hl_degrees = [graph.degree(r["__entity_name__"]) for r in hl_results]
+    print(hl_data)
+    print(hl_degrees)
+    hl_dataset = [
+        {**n, "entity_name": k["__entity_name__"], "rank": d}
+        for k, n, d in zip(hl_results, hl_data, hl_degrees)
+    ]
+    print(hl_dataset)
+
+
 if __name__ == '__main__':
     set_logger("main.log")
 
-    create_file_if_not_exists(SOURCE_TO_DOC_ID_MAP, "{}")
-    create_file_if_not_exists(DOC_ID_TO_SOURCE_MAP, "{}")
-    create_file_if_not_exists(DOC_ID_TO_EXCERPT_IDS, "{}")
-    create_file_if_not_exists(EXCERPT_DB, "{}")
-
-    import_documents()
+    # create_file_if_not_exists(SOURCE_TO_DOC_ID_MAP, "{}")
+    # create_file_if_not_exists(DOC_ID_TO_SOURCE_MAP, "{}")
+    # create_file_if_not_exists(DOC_ID_TO_EXCERPT_IDS, "{}")
+    # create_file_if_not_exists(EXCERPT_DB, "{}")
+    #
+    # import_documents()
 
     # print(query("what do rabbits eat?"))  # Should answer
     # print(query("what do cats eat?"))  # Should reject
+
+    kg_query("what do rabbits eat?")  # Should answer
 
     # remove_document_by_id("doc_4c3f8100da0b90c1a44c94e6b4ffa041")
