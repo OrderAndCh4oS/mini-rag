@@ -163,6 +163,7 @@ def extract_entities(content, doc_id):
                 if len(fields) >= 4:
                     _, name, category, description = fields[:4]
                     logger.info(f"Entity - Name: {name}, Category: {category}, Description: {description}")
+                    # Todo: implement upsert for node, if node exists combine data with separators
                     graph.add_node(name, category=category, description=description, excerpt_id=excerpt_id)
                     entity_id = make_hash(name, prefix="ent-")
                     embedding_content = f"{name} {description}"
@@ -182,6 +183,7 @@ def extract_entities(content, doc_id):
                     logger.info(
                         f"Relationship - Source: {source}, Target: {target}, Description: {description}, Keywords: {keywords}, Weight: {weight}"
                     )
+                    # Todo: implement upsert for edge, if edge exists combine data with separators
                     graph.add_edge(source, target, description=description, keywords=keywords, weight=weight)
                     relationship_id = make_hash(f"{source}_{target}", prefix="ent-")
                     embedding_content = f"{keywords} {source} {target} {description}"
@@ -271,6 +273,9 @@ def kg_query(text):
         for k, n, d in zip(hl_results, hl_data, hl_degrees)
     ]
     print(hl_dataset)
+
+    # Todo: get text units
+    # Todo: get relations
 
 
 if __name__ == '__main__':
