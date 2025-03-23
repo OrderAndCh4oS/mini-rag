@@ -1,5 +1,5 @@
 import os
-from pipes import SOURCE
+
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(ROOT_DIR, "data")
@@ -12,4 +12,6 @@ DOC_ID_TO_EXCERPT_IDS = os.path.join(DATA_DIR, "doc_id_to_excerpt_ids.json")
 EVALUATION_DATA_SET = os.path.join(DATA_DIR, "evaluation_data_set.json")
 EXCERPT_DB = os.path.join(DATA_DIR, "excerpt_db.json")
 EMBEDDINGS_DB = os.path.join(DATA_DIR, "embeddings_db.json")
+ENTITIES_DB = os.path.join(DATA_DIR, "entities_db.json")
+RELATIONSHIPS_DB = os.path.join(DATA_DIR, "relationships_db.json")
 KG_DB = os.path.join(DATA_DIR, "kg_db.graphml")

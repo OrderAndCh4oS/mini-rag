@@ -21,7 +21,7 @@ from app.llm import get_embedding, get_completion
 from app.logger import logger, set_logger
 
 from app.definitions import INPUT_DOCS_DIR, SOURCE_TO_DOC_ID_MAP, DOC_ID_TO_SOURCE_MAP, EMBEDDINGS_DB, \
-    EXCERPT_DB, DOC_ID_TO_EXCERPT_IDS, KG_DB
+    EXCERPT_DB, DOC_ID_TO_EXCERPT_IDS, KG_DB, ENTITIES_DB, RELATIONSHIPS_DB
 from app.prompts import get_query_system_prompt, excerpt_summary_prompt, get_extract_entities_prompt
 
 from app.utilities import get_json, remove_from_json, read_file, get_docs, make_hash, add_to_json, \
@@ -29,6 +29,8 @@ from app.utilities import get_json, remove_from_json, read_file, get_docs, make_
 
 dim = 1536
 embeddings_db = NanoVectorDB(dim, storage_file=EMBEDDINGS_DB)
+entities_db = NanoVectorDB(dim, storage_file=ENTITIES_DB)
+relationships_db = NanoVectorDB(dim, storage_file=RELATIONSHIPS_DB)
 
 
 def remove_document_by_id(doc_id):
@@ -87,8 +89,9 @@ def embed_document(content, doc_id):
         embedding_content = f"{excerpt}\n\n{summary}"
         embedding_result = get_embedding(embedding_content)
         vector = np.array(embedding_result, dtype=np.float32)
-        embeddings_db.upsert(
-            [{"__id__": excerpt_id, "__vector__": vector, "__doc_id__": doc_id, "__inserted_at__": time.time()}])
+        embeddings_db.upsert([
+            {"__id__": excerpt_id, "__vector__": vector, "__doc_id__": doc_id, "__inserted_at__": time.time()}
+        ])
         add_to_json(EXCERPT_DB, excerpt_id, {
             "doc_id": doc_id,
             "doc_order_index": i,
@@ -121,7 +124,6 @@ def get_excerpt_summary(full_doc, excerpt):
 
 def extract_entities(content, doc_id):
     excerpts = get_excerpts(content)
-    graph = None
     if os.path.exists(KG_DB):
         try:
             graph = nx.read_graphml(KG_DB)
@@ -136,15 +138,11 @@ def extract_entities(content, doc_id):
     for excerpt in excerpts:
         result = get_completion(get_extract_entities_prompt(excerpt))
         logger.info(result)
-        # --- Data Cleaning ---
-        # Remove the trailing '<|COMPLETE|>' marker
+
         data_str = result.replace('<|COMPLETE|>', '').strip()
 
-        # --- Split the Data into Records ---
-        # Split the data using the "+|+" marker
         records = split_string_by_multi_markers(data_str, ['+|+'])
 
-        # Remove surrounding parentheses from each record if present
         clean_records = []
         for record in records:
             if record.startswith('(') and record.endswith(')'):
@@ -156,36 +154,66 @@ def extract_entities(content, doc_id):
             fields = split_string_by_multi_markers(record, ['<|>'])
             if not fields:
                 continue
+            fields = [field[1:-1] if field.startswith('"') and field.endswith('"') else field for field in fields]
             record_type = fields[0].lower()
             logger.info(f"{record_type} {len(fields)}")
-            if record_type == '"entity"':
+            if record_type == 'entity':
                 if len(fields) >= 4:
                     _, name, category, description = fields[:4]
                     logger.info(f"Entity - Name: {name}, Category: {category}, Description: {description}")
                     graph.add_node(name, category=category, description=description)
-            elif record_type == '"relationship"':
+                    entity_id = make_hash(name, prefix="ent-")
+                    embedding_content = f"{name} {description}"
+                    embedding_result = get_embedding(embedding_content)
+                    vector = np.array(embedding_result, dtype=np.float32)
+                    entities_db.upsert([
+                        {
+                            "__id__": entity_id,
+                            "__vector__": vector,
+                            "__entity_name__": name,
+                            "__inserted_at__": time.time(),
+                        }
+                    ])
+            elif record_type == 'relationship':
                 if len(fields) >= 6:
                     _, source, target, description, keywords, weight = fields[:6]
-                    logger.info(f"Relationship - Source: {source}, Target: {target}, Description: {description}, Keywords: {keywords}, Weight: {weight}")
+                    logger.info(
+                        f"Relationship - Source: {source}, Target: {target}, Description: {description}, Keywords: {keywords}, Weight: {weight}")
                     graph.add_edge(source, target, description=description, keywords=keywords, weight=weight)
-            elif record_type == '"content_keywords"':
+                    relationship_id = make_hash(f"{source}_{target}", prefix="ent-")
+                    embedding_content = f"{keywords} {source} {target} {description}"
+                    embedding_result = get_embedding(embedding_content)
+                    vector = np.array(embedding_result, dtype=np.float32)
+                    relationships_db.upsert([
+                        {
+                            "__id__": relationship_id,
+                            "__vector__": vector,
+                            "__source__": source,
+                            "__target__": target,
+                            "__inserted_at__": time.time(),
+                        }
+                    ])
+            elif record_type == 'content_keywords':
                 if len(fields) >= 2:
                     logger.info(f"Content Keywords: {fields[1]}")
                     graph.graph['content_keywords'] = fields[1]
 
+    entities_db.save()
+    relationships_db.save()
+
     nx.write_graphml(graph, KG_DB)
-    # --- Verification: Print the Graph Contents ---
-    print("Nodes:")
-    for node, data in graph.nodes(data=True):
-        print(f"{node}: {data}")
-
-    print("\nEdges:")
-    for src, tgt, data in graph.edges(data=True):
-        print(f"{src} -> {tgt}: {data}")
-
-    if 'content_keywords' in graph.graph:
-        print("\nGraph Metadata:")
-        print("content_keywords:", graph.graph['content_keywords'])
+    # # --- Verification: Print the Graph Contents ---
+    # print("Nodes:")
+    # for node, data in graph.nodes(data=True):
+    #     print(f"{node}: {data}")
+    #
+    # print("\nEdges:")
+    # for src, tgt, data in graph.edges(data=True):
+    #     print(f"{src} -> {tgt}: {data}")
+    #
+    # if 'content_keywords' in graph.graph:
+    #     print("\nGraph Metadata:")
+    #     print("content_keywords:", graph.graph['content_keywords'])
 
 
 def query(text):
