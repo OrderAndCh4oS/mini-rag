@@ -1,5 +1,7 @@
 import inspect
 
+from app.definitions import TUPLE_SEP, REC_SEP
+
 
 def excerpt_summary_prompt(content, excerpt):
     return inspect.cleandoc(f"""
@@ -54,8 +56,8 @@ def get_query_system_prompt(excerpt_db, results):
 def get_extract_entities_prompt(content,
                                 entity_types=["species", "animal", "ecology", "evolution", "behaviour", "ecosystem"]):
     context_base = dict(
-        tuple_delimiter="<|>",
-        record_delimiter="+|+",
+        tuple_delimiter=TUPLE_SEP,
+        record_delimiter=REC_SEP,
         completion_delimiter="<|COMPLETE|>",
         entity_types=",".join(entity_types),
     )
