@@ -167,14 +167,13 @@ def extract_entities(content, doc_id):
                 if len(fields) >= 4:
                     _, name, category, description = fields[:4]
                     logger.info(f"Entity - Name: {name}, Category: {category}, Description: {description}")
-                    # Todo: implement upsert for node, if node exists combine data with separators
                     existing_node = graph.nodes.get(name)
                     if existing_node:
                         logger.info("NODE:" + str(existing_node))
-                        existing_categories = split_string_by_multi_markers(existing_node["category"], KG_SEP)
-                        categories = KG_SEP.join(set(list(existing_categories) + [category]))
                         existing_descriptions = split_string_by_multi_markers(existing_node["description"], KG_SEP)
                         descriptions = KG_SEP.join(set(list(existing_descriptions) + [description]))
+                        existing_categories = split_string_by_multi_markers(existing_node["category"], KG_SEP)
+                        categories = KG_SEP.join(set(list(existing_categories) + [category]))
                         existing_excerpt_ids = split_string_by_multi_markers(existing_node["excerpt_id"], KG_SEP)
                         excerpt_ids = KG_SEP.join(set(list(existing_excerpt_ids) + [excerpt_id]))
                         # Todo: summarise descriptions with LLM query if they get too long
@@ -207,13 +206,14 @@ def extract_entities(content, doc_id):
                     existing_edge = graph.edges.get((source, target))
                     weight = float(weight) if is_float_regex(weight) else 1.0
                     if existing_edge:
-                        weight = sum([weight, existing_edge["weight"]])
+                        print('HAS EXISTING EDGE' + str(existing_edge))
                         existing_descriptions = split_string_by_multi_markers(existing_edge["description"], KG_SEP)
                         descriptions = KG_SEP.join(set(list(existing_descriptions) + [description]))
-                        existing_excerpt_ids = split_string_by_multi_markers(existing_edge["excerpt_id"], KG_SEP)
-                        excerpt_ids = KG_SEP.join(set(list(existing_excerpt_ids) + [excerpt_id]))
                         existing_keywords = split_string_by_multi_markers(existing_edge["keywords"], KG_SEP)
                         keywords = KG_SEP.join(set(list(existing_keywords) + [keywords]))
+                        existing_excerpt_ids = split_string_by_multi_markers(existing_edge["excerpt_id"], KG_SEP)
+                        excerpt_ids = KG_SEP.join(set(list(existing_excerpt_ids) + [excerpt_id]))
+                        weight = sum([weight, existing_edge["weight"]])
                         graph.add_edge(source, target, description=descriptions, keywords=keywords, weight=weight, excerpt_id=excerpt_ids)
                     else:
                         graph.add_edge(source, target, description=description, keywords=keywords, weight=weight, excerpt_id=excerpt_id)
