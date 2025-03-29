@@ -1,9 +1,9 @@
 import html
 import json
 import os
+import pathlib
 import re
 from hashlib import md5
-from typing import Union
 
 
 def create_file_if_not_exists(file_path, default_content=""):
@@ -19,6 +19,16 @@ def write_file(file_path, content):
 def read_file(file_path):
     f = open(file_path, "r")
     return f.read()
+
+
+def delete_all_files(directory):
+    p = pathlib.Path(directory)
+    if not p.exists():
+        print(f"Directory '{directory}' does not exist.")
+        return
+    for item in p.iterdir():
+        if item.is_file() and not item.is_symlink():
+            item.unlink()
 
 
 def get_json(file_path):
@@ -92,3 +102,7 @@ def extract_json_from_text(content: str):
         except json.JSONDecodeError:
             return None
     return None
+
+
+def is_float_regex(value):
+    return bool(re.match(r"^[-+]?[0-9]*\.?[0-9]+$", value))

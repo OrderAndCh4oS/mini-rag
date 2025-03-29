@@ -22,12 +22,13 @@ from app.logger import logger, set_logger
 
 from app.definitions import INPUT_DOCS_DIR, SOURCE_TO_DOC_ID_MAP, DOC_ID_TO_SOURCE_MAP, EMBEDDINGS_DB, \
     EXCERPT_DB, DOC_ID_TO_EXCERPT_IDS, KG_DB, ENTITIES_DB, RELATIONSHIPS_DB, KG_SEP, TUPLE_SEP, REC_SEP, COMPLETE_TAG, \
-    QUERY_CACHE, EMBEDDING_CACHE
+    QUERY_CACHE, EMBEDDING_CACHE, LOG_DIR, DATA_DIR
 from app.prompts import get_query_system_prompt, excerpt_summary_prompt, get_extract_entities_prompt, \
     get_high_low_level_keywords_prompt
 
 from app.utilities import get_json, remove_from_json, read_file, get_docs, make_hash, add_to_json, \
-    create_file_if_not_exists, split_string_by_multi_markers, clean_str, extract_json_from_text
+    create_file_if_not_exists, split_string_by_multi_markers, clean_str, extract_json_from_text, is_float_regex, \
+    delete_all_files
 
 dim = 1536
 embeddings_db = NanoVectorDB(dim, storage_file=EMBEDDINGS_DB)
@@ -155,11 +156,11 @@ def extract_entities(content, doc_id):
 
         for record in records:
             fields = split_string_by_multi_markers(record, [TUPLE_SEP])
-            print("FIELDS", fields)
+            logger.info("FIELDS: " + ",".join(fields))
             if not fields:
                 continue
             fields = [field[1:-1] if field.startswith('"') and field.endswith('"') else field for field in fields]
-            print("FIELDS TWO", fields)
+            logger.info("FIELDS TWO: " + ",".join(fields))
             record_type = fields[0].lower()
             logger.info(f"{record_type} {len(fields)}")
             if record_type == 'entity':
@@ -169,13 +170,14 @@ def extract_entities(content, doc_id):
                     # Todo: implement upsert for node, if node exists combine data with separators
                     existing_node = graph.nodes.get(name)
                     if existing_node:
-                        print("NODE", existing_node)
+                        logger.info("NODE:" + str(existing_node))
                         existing_categories = split_string_by_multi_markers(existing_node["category"], KG_SEP)
                         categories = KG_SEP.join(set(list(existing_categories) + [category]))
                         existing_descriptions = split_string_by_multi_markers(existing_node["description"], KG_SEP)
                         descriptions = KG_SEP.join(set(list(existing_descriptions) + [description]))
                         existing_excerpt_ids = split_string_by_multi_markers(existing_node["excerpt_id"], KG_SEP)
                         excerpt_ids = KG_SEP.join(set(list(existing_excerpt_ids) + [excerpt_id]))
+                        # Todo: summarise descriptions with LLM query if they get too long
                         graph.add_node(
                             name,
                             category=categories,
@@ -199,11 +201,22 @@ def extract_entities(content, doc_id):
             elif record_type == 'relationship':
                 if len(fields) >= 6:
                     _, source, target, description, keywords, weight = fields[:6]
-                    logger.info(
-                        f"Relationship - Source: {source}, Target: {target}, Description: {description}, Keywords: {keywords}, Weight: {weight}"
-                    )
-                    # Todo: implement upsert for edge, if edge exists combine data with separators
-                    graph.add_edge(source, target, description=description, keywords=keywords, weight=weight)
+                    source, target = sorted([source, target])
+                    logger.info(f"Relationship - Source: {source}, Target: {target}, Description: {description}, Keywords: {keywords}, Weight: {weight}, Excerpt ID: {excerpt_id}")
+                    # Todo: summarise descriptions with LLM query
+                    existing_edge = graph.edges.get((source, target))
+                    weight = float(weight) if is_float_regex(weight) else 1.0
+                    if existing_edge:
+                        weight = sum([weight, existing_edge["weight"]])
+                        existing_descriptions = split_string_by_multi_markers(existing_edge["description"], KG_SEP)
+                        descriptions = KG_SEP.join(set(list(existing_descriptions) + [description]))
+                        existing_excerpt_ids = split_string_by_multi_markers(existing_edge["excerpt_id"], KG_SEP)
+                        excerpt_ids = KG_SEP.join(set(list(existing_excerpt_ids) + [excerpt_id]))
+                        existing_keywords = split_string_by_multi_markers(existing_edge["keywords"], KG_SEP)
+                        keywords = KG_SEP.join(set(list(existing_keywords) + [keywords]))
+                        graph.add_edge(source, target, description=descriptions, keywords=keywords, weight=weight, excerpt_id=excerpt_ids)
+                    else:
+                        graph.add_edge(source, target, description=description, keywords=keywords, weight=weight, excerpt_id=excerpt_id)
                     relationship_id = make_hash(f"{source}_{target}", prefix="ent-")
                     embedding_content = f"{keywords} {source} {target} {description}"
                     embedding_result = get_embedding(embedding_content)
@@ -255,25 +268,25 @@ def kg_query(text):
     prompt = get_high_low_level_keywords_prompt(text)
     result = get_completion(prompt)
     keyword_data = extract_json_from_text(result)
-    print(keyword_data)
+    logger.info(keyword_data)
 
     ll_keywords = keyword_data.get("low_level_keywords", [])
-    print(ll_keywords)
+    logger.info(ll_keywords)
     if len(ll_keywords):
         ll_embedding = get_embedding(ll_keywords)
         ll_embedding_array = np.array(ll_embedding)
         ll_results = entities_db.query(query=ll_embedding_array, top_k=5, better_than_threshold=0.02)
-        print(ll_results)
+        logger.info(ll_results)
     graph = nx.read_graphml(KG_DB)
     ll_data = [graph.nodes.get(r["__entity_name__"]) for r in ll_results]
     ll_degrees = [graph.degree(r["__entity_name__"]) for r in ll_results]
-    print(ll_degrees)
-    print(ll_data)
+    logger.info(ll_degrees)
+    logger.info(ll_data)
     ll_dataset = [
         {**n, "entity_name": k["__entity_name__"], "rank": d}
         for k, n, d in zip(ll_results, ll_data, ll_degrees)
     ]
-    print(ll_dataset)
+    logger.info(ll_dataset)
     sort_kg_data_set_by_relation_size(graph, ll_dataset)
 
     # # Todo: remove duplication of functionality here
@@ -300,23 +313,26 @@ def kg_query(text):
 
 def sort_kg_data_set_by_relation_size(graph, kg_dataset):
     excerpt_ids = [row["excerpt_id"] for row in kg_dataset]
-    print(excerpt_ids)
+    logger.info(excerpt_ids)
     # Todo: create set of excerpt ids
     # Todo: edges for each node in data set by entity name
     edges = [graph.edges(row["entity_name"]) for row in kg_dataset]
-    print(edges)
+    logger.info(edges)
     sibling_node_names = set()
     for edge in edges:
         if not edge:
             continue
         sibling_node_names.update([e[1] for e in edge])
-    print(sibling_node_names)
+    logger.info(sibling_node_names)
     sibling_nodes = [graph.nodes.get(name) for name in list(sibling_node_names)]
-    print(sibling_nodes)
+    logger.info(sibling_nodes)
 
 
 if __name__ == '__main__':
     set_logger("main.log")
+
+    delete_all_files(DATA_DIR)
+    delete_all_files(LOG_DIR)
 
     create_file_if_not_exists(SOURCE_TO_DOC_ID_MAP, "{}")
     create_file_if_not_exists(DOC_ID_TO_SOURCE_MAP, "{}")
@@ -333,3 +349,5 @@ if __name__ == '__main__':
     # kg_query("what do rabbits eat?")  # Should answer
 
     # remove_document_by_id("doc_4c3f8100da0b90c1a44c94e6b4ffa041")
+
+    # Use Jaal graph visualisation to inspect knowledge graph
